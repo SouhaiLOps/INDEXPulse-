@@ -1,0 +1,57 @@
+name: Daily CAC40 pipeline
+
+on:
+  # exécution automatique tous les jours à 06:00 UTC
+  schedule:
+    - cron: "0 6 * * *"
+  # lancement manuel depuis l’onglet "Actions"
+  workflow_dispatch:
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+
+    # nécessaire si tu veux que le workflow pousse les fichiers mis à jour dans le repo
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run daily CAC40 pipeline (download + preprocessing + ARIMA)
+        run: |
+          python - << 'PYCODE'
+          from src.download_yf import update_fchi_tidy
+          from src.preprocessing import preprocess_cac40_from_tidy
+          from src.arima_train import train_arima_logret1
+
+          # 1) mise à jour des données brutes (ohlcv_10y.parquet)
+          tidy_all = update_fchi_tidy()
+
+          # 2) feature engineering + sauvegarde FCHI_features_h1d.parquet
+          preprocess_cac40_from_tidy(tidy_all)
+
+          # 3) entraînement ARIMA + sauvegarde du modèle dans models/
+          train_arima_logret1()
+          PYCODE
+
+      # (optionnel) Commit automatique des fichiers mis à jour
+      - name: Commit and push updated data & model
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update CAC40 data, features and ARIMA model [skip ci]"
+          file_pattern: |
+            data/raw/ohlcv_10y.parquet
+            data/processed/FCHI_features_h1d.parquet
+            models/arima_logret1_FCHI.pkl
