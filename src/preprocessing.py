@@ -1,80 +1,28 @@
 # src/preprocessing.py
-
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
-import yfinance as yf
 from pathlib import Path
-from typing import Iterable, Dict
+from typing import Iterable
 
-# ====== CONFIG DE BASE ======
+import numpy as np
+import pandas as pd
 
-TICKER_CAC40 = "^FCHI"
+# -----------------------------------------------------
+# Chemins basés sur l'emplacement du fichier
+# -----------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROC_DIR = PROJECT_ROOT / "data" / "processed"
 
-# fenêtres & lags
+# Fenêtres & lags
 FE_WINDOWS = [5, 10, 20, 50, 100, 200]
 FE_LAGS = [1, 2, 5, 10]
 HORIZON_D = 1  # prédire le retour à J+1
 
-DEFAULT_YEARS = 10
-RAW_DIR = "data/raw"
-PROC_DIR = "data/processed"
+TICKER_CAC40 = "^FCHI"
 
 
-# ====== 1. DOWNLOAD & MISE EN FORME OHLCV ======
 
-def download_ohlcv(
-    tickers: Iterable[str],
-    years: int = DEFAULT_YEARS,
-    raw_dir: str = RAW_DIR,
-) -> pd.DataFrame:
-    """
-    Télécharge les données OHLCV quotidiennes sur 'years' années
-    pour une liste de tickers Yahoo, retourne un DataFrame 'tidy' :
-    colonnes = [date, ticker, open, high, low, close, adj_close, volume]
-    """
-    tickers = list(tickers)
-    end = pd.Timestamp.today().normalize()
-    start = end - pd.DateOffset(years=years)
-
-    raw = yf.download(
-        tickers,
-        start=start.date().isoformat(),
-        end=end.date().isoformat(),
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=False,
-        actions=False,
-        progress=False,
-        threads=True,
-    )
-
-    # raw: colonnes multi-index (niveau 0 = ticker, niveau 1 = champs)
-    tidy = (
-        raw.stack(level=0)
-           .rename_axis(index=["date", "ticker"])
-           .reset_index()
-           .rename(columns={
-               "Open": "open",
-               "High": "high",
-               "Low": "low",
-               "Close": "close",
-               "Adj Close": "adj_close",
-               "Volume": "volume",
-           })
-           .sort_values(["ticker", "date"])
-           .reset_index(drop=True)
-    )
-
-    # sauvegarde brute (optionnel mais utile pour debug)
-    Path(raw_dir).mkdir(parents=True, exist_ok=True)
-    tidy.to_parquet(Path(raw_dir) / "ohlcv_full.parquet", index=False)
-
-    return tidy
-
-
-# ====== 2. FEATURE ENGINEERING ======
+# ========= FONCTIONS DE FEATURES =========
 
 def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     di = df["date"]
@@ -127,11 +75,12 @@ def make_target(df: pd.DataFrame, horizon: int = HORIZON_D) -> pd.DataFrame:
     return df
 
 
-def build_features_one_ticker(tidy_one: pd.DataFrame, horizon: int = HORIZON_D) -> pd.DataFrame:
+def build_features_one_ticker(tidy_one: pd.DataFrame,
+                              horizon: int = HORIZON_D) -> pd.DataFrame:
     """
-    tidy_one : données OHLCV pour un seul ticker
-               colonnes = [date,ticker,open,high,low,close,adj_close,volume]
-    Retour : DataFrame features + cibles, lignes datées, sans NaN critiques.
+    tidy_one : DataFrame OHLCV pour un seul ticker :
+      [date, ticker, open, high, low, close, adj_close, volume]
+    Retour : features + target pour ce ticker.
     """
     df = tidy_one.sort_values("date").copy()
 
@@ -148,26 +97,25 @@ def build_features_one_ticker(tidy_one: pd.DataFrame, horizon: int = HORIZON_D) 
     return df
 
 
-# ====== 3. PIPELINE CAC40 ======
+# ========= PIPELINE CAC40 SANS DOWNLOAD =========
 
-def preprocess_cac40(
-    years: int = DEFAULT_YEARS,
-    raw_dir: str = RAW_DIR,
-    processed_dir: str = PROC_DIR,
+def preprocess_cac40_from_tidy(
+    tidy: pd.DataFrame,
+    processed_dir: Path | str = PROC_DIR,
 ) -> pd.DataFrame:
     """
-    Pipeline complet pour le CAC40 :
-    - téléchargement OHLCV (10 ans par défaut)
-    - feature engineering
-    - sauvegarde dans data/processed
-    - retourne le DataFrame de features
+    Applique le feature engineering au tidy du CAC40 et sauvegarde
+    le dataset dans data/processed.
     """
-    tidy = download_ohlcv([TICKER_CAC40], years=years, raw_dir=raw_dir)
     one = tidy[tidy["ticker"] == TICKER_CAC40].copy()
     feat = build_features_one_ticker(one, horizon=HORIZON_D)
 
-    Path(processed_dir).mkdir(parents=True, exist_ok=True)
-    out_path = Path(processed_dir) / f"FCHI_features_h{HORIZON_D}d.parquet"
+    processed_dir = Path(processed_dir)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = processed_dir / f"FCHI_features_h{HORIZON_D}d.parquet"
     feat.to_parquet(out_path, index=False)
+    print("[OK] Features FCHI écrites dans :", out_path)
 
     return feat
+
