@@ -450,32 +450,6 @@ with col_alloc:
     for t in TICKERS_LIST:
         if t not in allocation.index:
             continue
-        row    = allocation.loc[t]
-        w      = row["weight"] * 100
-        lo     = row["weight_lo"] * 100
-        hi     = row["weight_hi"] * 100
-        color  = COLORS[t]
-        label  = LABELS[t]
-        bar_w  = row["weight"] * 100
-        lo_pct = row["weight_lo"] * 100
-        hi_pct = row["weight_hi"] * 100
-
-        alloc_html += f"""
-        <div class="alloc-row">
-            <div class="alloc-label">{label}</div>
-            <div class="alloc-bar-track">
-                {'<div class="alloc-ic" style="left:' + str(lo_pct) + '%;width:' + str(hi_pct-lo_pct) + '%;background:' + color + '"></div>' if show_ic else ''}
-                <div class="alloc-bar-fill" style="width:{bar_w}%;background:{color}"></div>
-            </div>
-            <div class="alloc-pct">{w:.1f}%</div>
-            {'<div class="alloc-ic-text">' + str(lo:.0f) + '–' + str(hi:.0f) + '%</div>' if show_ic else ''}
-        </div>"""
-
-    # Réécriture propre sans f-string imbriqué
-    alloc_html = ""
-    for t in TICKERS_LIST:
-        if t not in allocation.index:
-            continue
         row   = allocation.loc[t]
         w     = row["weight"] * 100
         lo    = row["weight_lo"] * 100
