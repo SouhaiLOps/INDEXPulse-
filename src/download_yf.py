@@ -1,178 +1,174 @@
 # src/download_yf.py
-
+# PortfolioMMM — téléchargement et mise à jour des 4 actifs
+# =============================================================
 from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
-# -----------------------------------------------------
-# Chemins basés sur l'emplacement de CE fichier
-# -----------------------------------------------------
+from src.config import (
+    TICKERS, ETF_PROXIES, START_DATE,
+    RAW_DIR,
+)
 
-# src/ -> project_root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-RAW_TIDY_PATH = RAW_DIR / "ohlcv_10y.parquet"   # fichier racine/data/raw/ohlcv_10y.parquet
-
-TICKER_FCHI = "^FCHI"
+RAW_PATH     = PROJECT_ROOT / RAW_DIR / "ohlcv_portfolio.parquet"
+Path(PROJECT_ROOT / RAW_DIR).mkdir(parents=True, exist_ok=True)
 
 
+# ── Helpers ───────────────────────────────────────────────────
 
-# -----------------------------------------------------
-# 1) Télécharger un bloc de données et le mettre au
-#    format tidy (EXACTEMENT comme dans ton notebook)
-# -----------------------------------------------------
-
-def download_block_tidy(tickers, start, end) -> pd.DataFrame:
+def _to_tidy(raw: pd.DataFrame, tickers: list) -> pd.DataFrame:
     """
-    Télécharge un bloc OHLCV multi-tickers avec yfinance et
-    renvoie un DataFrame au format tidy :
+    Convertit le DataFrame multi-level de yfinance en format tidy :
+        date | ticker | close | volume
+    """
+    if raw.empty:
+        return pd.DataFrame(columns=["date", "ticker", "close", "volume"])
 
-        date | ticker | open | high | low | close | adj_close | volume
+    # yfinance retourne (metric, ticker) en colonnes multi-level
+    frames = []
+    for t in tickers:
+        try:
+            sub = pd.DataFrame({
+                "date":   raw.index,
+                "ticker": t,
+                "close":  raw["Close"][t].values   if "Close"  in raw.columns.get_level_values(0) else raw[t]["Close"].values,
+                "volume": raw["Volume"][t].values  if "Volume" in raw.columns.get_level_values(0) else raw[t]["Volume"].values,
+            })
+            frames.append(sub)
+        except Exception as e:
+            print(f"[WARN] {t} ignoré : {e}")
+
+    if not frames:
+        return pd.DataFrame(columns=["date", "ticker", "close", "volume"])
+
+    df = pd.concat(frames, ignore_index=True)
+    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
+    df = df.dropna(subset=["close"]).sort_values(["ticker", "date"]).reset_index(drop=True)
+    return df
+
+
+def _download(tickers: list, start: str, end: str) -> pd.DataFrame:
+    """
+    Télécharge les tickers. Si un ticker échoue, tente le proxy ETF.
     """
     raw = yf.download(
         tickers,
-        start=start.date().isoformat(),
-        end=end.date().isoformat(),
+        start=start,
+        end=end,
         interval="1d",
-        group_by="ticker",
-        auto_adjust=False,   # on veut les 4 prix bruts + Adj Close séparé
-        actions=False,
+        auto_adjust=False,
         progress=False,
         threads=True,
+        group_by="column",    # (metric, ticker)
     )
+    tidy = _to_tidy(raw, tickers)
 
-    if raw.empty:
-        print(f"[WARN] yf.download a renvoyé vide pour {tickers} entre {start.date()} et {end.date()}")
-        return pd.DataFrame(columns=[
-            "date", "ticker", "open", "high", "low", "close", "adj_close", "volume"
-        ])
+    # Fallback ETF pour les tickers vides
+    missing = [t for t in tickers if t not in tidy["ticker"].unique()]
+    for t in missing:
+        proxy = ETF_PROXIES.get(t)
+        if proxy:
+            print(f"[INFO] {t} vide — tentative proxy {proxy}")
+            raw2 = yf.download(proxy, start=start, end=end, interval="1d",
+                               auto_adjust=False, progress=False)
+            if not raw2.empty:
+                sub = pd.DataFrame({
+                    "date":   raw2.index,
+                    "ticker": t,            # on garde le nom original
+                    "close":  raw2["Close"].values,
+                    "volume": raw2["Volume"].values,
+                })
+                sub["date"] = pd.to_datetime(sub["date"]).dt.tz_localize(None).dt.normalize()
+                tidy = pd.concat([tidy, sub], ignore_index=True)
+                print(f"[OK] {t} récupéré via proxy {proxy}")
 
-    # >>> EXACTEMENT ton code notebook <<<
-    tidy = (
-        raw.stack(level=0)
-           .rename_axis(index=["date", "ticker"])
-           .reset_index()
-           .rename(columns={
-               "Open": "open",
-               "High": "high",
-               "Low": "low",
-               "Close": "close",
-               "Adj Close": "adj_close",
-               "Volume": "volume",
-           })
-           .sort_values(["ticker", "date"])
-           .reset_index(drop=True)
-    )
-
-    tidy["date"] = pd.to_datetime(tidy["date"])
     return tidy
 
 
-# -----------------------------------------------------
-# 2) Charger le parquet tidy existant (ou l'initialiser)
-# -----------------------------------------------------
+# ── Fonctions publiques ───────────────────────────────────────
 
-def load_or_init_tidy() -> pd.DataFrame:
+def load_or_init() -> pd.DataFrame:
     """
-    Charge data/raw/ohlcv_10y.parquet.
-    S'il n'existe pas, télécharge 10 ans pour ^FCHI
-    et crée ce fichier.
+    Charge le parquet existant ou initialise depuis START_DATE.
     """
-    if RAW_TIDY_PATH.exists():
-        df = pd.read_parquet(RAW_TIDY_PATH)
+    if RAW_PATH.exists():
+        df = pd.read_parquet(RAW_PATH)
         df["date"] = pd.to_datetime(df["date"])
-        print("[INFO] Tidy existant chargé :", RAW_TIDY_PATH)
+        print(f"[INFO] Parquet chargé : {RAW_PATH} ({len(df):,} lignes)")
         return df
 
-    print("[INFO] Aucun parquet tidy trouvé, initialisation sur 10 ans pour FCHI…")
+    print(f"[INFO] Initialisation depuis {START_DATE}…")
     end = pd.Timestamp.today().normalize()
-    start = end - pd.DateOffset(years=10)
-
-    tidy = download_block_tidy([TICKER_FCHI], start, end)
-    tidy.to_parquet(RAW_TIDY_PATH, index=False)
-    print("[OK] Tidy initial créé :", RAW_TIDY_PATH)
-
+    tidy = _download(TICKERS, start=START_DATE, end=end.date().isoformat())
+    tidy.to_parquet(RAW_PATH, index=False)
+    print(f"[OK] Parquet créé : {len(tidy):,} lignes → {RAW_PATH}")
     return tidy
 
 
-# -----------------------------------------------------
-# 3) Mettre à jour uniquement FCHI dans le parquet tidy
-# -----------------------------------------------------
-
-def update_fchi_tidy() -> pd.DataFrame:
+def update() -> pd.DataFrame:
     """
-    - Charge le tidy multi-tickers depuis data/raw/ohlcv_10y.parquet
-    - Cherche la dernière date disponible pour ^FCHI
-    - Télécharge les jours manquants
-    - Concatène les nouvelles lignes pour FCHI
-    - Ré-écrit data/raw/ohlcv_10y.parquet
-
-    Retourne le tidy complet mis à jour.
+    Télécharge uniquement les jours manquants pour chaque ticker.
+    Ré-écrit le parquet consolidé.
     """
-    # 1. Charger (ou créer) l'historique tidy
-    tidy_all = load_or_init_tidy()
+    tidy_all = load_or_init()
+    today    = pd.Timestamp.today().normalize()
+    new_rows = []
 
-    # 2. Extraire la partie FCHI
-    fchi_mask = tidy_all["ticker"] == TICKER_FCHI
-    tidy_fchi = tidy_all[fchi_mask].copy()
+    for t in TICKERS:
+        sub      = tidy_all[tidy_all["ticker"] == t]
+        last     = sub["date"].max() if not sub.empty else pd.Timestamp(START_DATE)
+        start    = (last + pd.Timedelta(days=1)).date().isoformat()
 
-    if tidy_fchi.empty:
-        last_date = None
-    else:
-        last_date = tidy_fchi["date"].max().normalize()
+        if pd.Timestamp(start) > today:
+            print(f"[INFO] {t} déjà à jour ({last.date()})")
+            continue
 
-    print(f"[INFO] Dernière date FCHI dans le parquet tidy : {last_date}")
+        print(f"[INFO] {t} : téléchargement {start} → {today.date()}")
+        chunk = _download([t], start=start, end=today.date().isoformat())
+        if not chunk.empty:
+            new_rows.append(chunk)
+            print(f"[OK]   {t} : +{len(chunk)} lignes")
+        else:
+            print(f"[WARN] {t} : aucune donnée reçue")
 
-    today = pd.Timestamp.today().normalize()
+    if new_rows:
+        tidy_all = (
+            pd.concat([tidy_all] + new_rows, ignore_index=True)
+              .drop_duplicates(subset=["date", "ticker"], keep="last")
+              .sort_values(["ticker", "date"])
+              .reset_index(drop=True)
+        )
+        tidy_all.to_parquet(RAW_PATH, index=False)
+        print(f"[OK] Parquet mis à jour : {len(tidy_all):,} lignes totales")
 
-    # 3. Déterminer la période à compléter
-    if last_date is None:
-        # on n'a encore aucune ligne FCHI (cas théorique)
-        start = today - pd.DateOffset(years=10)
-    else:
-        start = last_date + pd.Timedelta(days=1)
+    return tidy_all
 
-    if start > today:
-        print("[INFO] Aucune nouvelle date à télécharger pour FCHI (déjà à jour).")
-        return tidy_all
 
-    print(f"[INFO] Téléchargement FCHI du {start.date()} au {today.date()}…")
+def fetch_close(tickers: list = None, start: str = START_DATE) -> pd.DataFrame:
+    """
+    Interface simple pour build_dataset.py :
+    Retourne un DataFrame wide  date × ticker  avec les prix de clôture.
+    """
+    tickers = tickers or TICKERS
+    tidy    = load_or_init()
+    tidy    = tidy[tidy["ticker"].isin(tickers)]
 
-    new_tidy = download_block_tidy([TICKER_FCHI], start, today)
-
-    if new_tidy.empty:
-        print("[WARN] Aucunes nouvelles lignes reçues pour FCHI.")
-        return tidy_all
-
-    # 4. Mettre à jour uniquement la partie FCHI
-    tidy_fchi_updated = (
-        pd.concat([tidy_fchi, new_tidy], ignore_index=True)
-          .drop_duplicates(subset=["date", "ticker"], keep="last")
-          .sort_values("date")
-          .reset_index(drop=True)
+    close_wide = (
+        tidy.pivot(index="date", columns="ticker", values="close")
+            .sort_index()
     )
-
-    # 5. Recomposer le tidy global (autres tickers inchangés)
-    tidy_without_fchi = tidy_all[~fchi_mask]
-    tidy_all_updated = (
-        pd.concat([tidy_without_fchi, tidy_fchi_updated], ignore_index=True)
-          .sort_values(["ticker", "date"])
-          .reset_index(drop=True)
-    )
-
-    # 6. Sauvegarder
-    tidy_all_updated.to_parquet(RAW_TIDY_PATH, index=False)
-    print("[OK] Parquet tidy mis à jour pour FCHI :", RAW_TIDY_PATH)
-
-    return tidy_all_updated
+    close_wide = close_wide[tidy["date"] >= start] if start else close_wide
+    return close_wide
 
 
-# -----------------------------------------------------
-# 4) Point d’entrée script
-# -----------------------------------------------------
-
+# ── Point d'entrée ────────────────────────────────────────────
 if __name__ == "__main__":
-    update_fchi_tidy()
+    df = update()
+    print("\n=== Résumé ===")
+    print(df.groupby("ticker").agg(
+        debut=("date", "min"),
+        fin=("date", "max"),
+        lignes=("date", "count"),
+        close_last=("close", "last"),
+    ).to_string())
